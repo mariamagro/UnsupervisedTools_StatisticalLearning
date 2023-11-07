@@ -1,0 +1,947 @@
+---
+title: 'Unsupervised tools'
+author: "María Ángeles Magro Garrote"
+date: '2022'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## An insight of Twitch
+
+Twitch is an <b> online platform </b> who allows people stream on live. 
+Although the focus of it tends to put on video games, there is a huge variety of categories such as just-chatting or sports. Due to this, Twitch gathers  <b> 31 million people </b> each day. What is more, the most viewed streamers make a big quantity of money due to adds, subscriptions and donations. </br>
+
+Taking all this into account, the goal of this project is to analyse a dataset containing information of the top 1000 streamers of Twitch created by <b> Aayush Mishra </b> in order to get some conclusions from it. This data set contain information from 2020. 
+
+The questions that will be answered (among others) are: 
+
+* Does the language they stream in affects the views of the stream? Or being partnered?
+
+* Does having a peak of viewers affect your channel?
+
+* Does having a lot of viewers impact your followers number?
+
+All in all, <b><u>what makes a streamer great?</u></b>
+</br>
+
+Before starting the analysis, all the libraries needed will be loaded.
+```{r message=FALSE, warning=FALSE}
+rm(list=ls())
+library(VIM)
+library(mice)
+library(tidyverse)
+# ggplots side by side (grid.arrange)
+library(gridExtra)
+# ggplot2-based visualization of correlations
+library(GGally) 
+# ggplot2-based visualization of pca
+library(factoextra) 
+library(lubridate)
+#only this for getsymbols
+library(quantmod) 
+library(mclust)
+library(cluster)
+library(kernlab)
+```
+</br>
+
+## 1. Data preprocessing
+
+First, we read the data.
+
+```{r}
+data = read.csv("twitchdata-update.csv", header = TRUE, sep = ",")
+
+# shortening the long variable names
+colnames(data)[colnames(data) == "Watch.time.Minutes."] ="Watch.time.min"
+colnames(data)[colnames(data) == "Stream.time.minutes."] ="Stream.time.min"
+
+head(data)
+# number of streamers in the data set
+nrow(data)
+```
+The data set is ordered in a descending way, using Watch.Time.Min variable.
+
+Before continuing, it must be clarify the meaning of each
+variable:
+
+* <b>Channel</b>: name of the streamer
+* <b>Watch.time.min</b>: time (min) that streamer has been watch in total.
+* <b>Stream.time.min</b>: time (min) that streamer has streamed.
+* <b>Peak.viewers</b>: highest viewers at the same time of the steamer.
+* <b>Average.viewers</b>: the mean of viewers the streamer has.
+* <b>Followers</b>: followers that streamer has.
+* <b>Followers.gained</b>: new followers obtained by the streamer.
+* <b>Views.gained</b>: new views obtained by the streamer.
+* <b>Partnered</b>: if the streamer is partnered.
+* <b>Mature</b>: if the category of the stream is +18 or not. +18 streaming may contain nudity, violence, etc... (F.ex: in videogames)
+* <b>Language</b>: language spoken in the streamings.
+
+<i>(Note that a viewer can watch a stream without being a follower)</i> <br>
+<i>(Note that it is being referred to followers and not subscribers)</i>
+
+Now, it must be checked the the missing values of the variables.
+
+```{r}
+# checking missing values
+aggr(data, numbers = TRUE, sortVars = TRUE, labels = names(data), cex.axis = .7, gap = 1, ylab= c('Missing data','Pattern'), col = c("purple", "red", "orange"))
+
+
+# checking for duplicated data
+sum(duplicated(data))
+```
+
+No missing or duplicated data is found.
+</br>
+All the variables may give us some relevant information but
+the one containing the names of the streamers so it is erased, but first it will be saved for later analysis. Also, some 
+transformations can be done to the Boolean variables.
+</br>
+```{r}
+# eliminating irrelevant information
+# before deleting the column, saving it for later.
+names = data[, 1]
+data = data %>% select(-c(Channel))
+
+# there are two Boolean variables that can be
+# transformed to numbers (Partnered and Mature).
+
+data$Partnered=factor(data$Partnered, levels=
+                           c("False","True"), labels=c(1,2))
+data$Mature=factor(data$Mature, levels=
+                        c("False","True"), labels=c(1,2))
+
+# converting everything to numeric but the language variable.
+for(i in 1:9) {
+  data[,i] <- as.numeric(as.numeric(data[,i])) 
+}
+
+# our data set now is: 
+head(data)
+```
+</br>
+Now, the outliers must be check. It has been decided to study
+the outliers of Watch.time.min because it is the one chosen to order top 1000 streamers, <b>NOT</b> because it is our target variable. Remember it is being tried to answer to the question: what makes a streamer great?
+</br>
+```{r}
+mu <- mean(data$Watch.time.min)
+sigma <- sd(data$Watch.time.min)
+
+sum(data$Watch.time.min < mu - 3*sigma | data$Watch.time.min > mu + 3*sigma)
+
+QI <- quantile(data$Watch.time.min, 0.25)
+QS <- quantile(data$Watch.time.min, 0.75)
+IQR = QS-QI
+
+sum(data$Watch.time.min < QI - 1.5*IQR | data$Watch.time.min > QS + 1.5*IQR)
+```
+</br>
+Despite this, it has been decided <b>NOT</b> to eliminate the outliers because the purpose of this analysis is to study
+top 1000 streamers and due to this, erasing them would lead us
+to a huge loss of information of the highest watch people. </br>
+
+Furthermore, to check this:
+```{r}
+mean1 = mean(data$Watch.time.min[which(data$Watch.time.min < mu - 3*sigma | data$Watch.time.min > mu + 3*sigma)]);mean1
+
+mean2=mean(data$Watch.time.min);mean2
+
+mean1>mean2
+```
+</br>
+So, the mean of Watch.time.min of the outliers is way more bigger than the mean of all the dataset. So, erasing outliers
+would give us losing information of the highest watched streamers, which would collide with the goal of our study. That is why it has been decided not to erase it.
+
+Before continuing, some techniques that will be used may require only having numeric variables, which lead us to create another dataset without the language variable.
+
+```{r}
+# creating a new data set with only the numeric variables.
+data.num = data[1:9]
+# languages will be saved as names for using it later.
+languages = data[,10]
+# the numeric data set is:
+head(data.num)
+```
+</br>
+Also, it must be studied if the data set needs scaling.
+```{r}
+# comparing  our data with the version scaled.
+par(mfrow=c(1,2))
+boxplot(data.num, las=2, col="purple", main ="Data without scaling", cex.axis = 0.6)
+boxplot(scale(data.num), las=2, col="purple", main = "Data scaled", cex.axis = 0.6)
+
+# scaling the data set to work with smaller values.
+for(i in 1:9) {
+  data.num[,i] <- scale(data[,i]) 
+}
+```
+
+## 2. Insights before using tools
+
+Before strting with unsupervised learning, a general study of our data set is done.
+</br>
+First, it is going to be check the correlation coefficient among all the variables.
+```{r}
+R = cor(data.num);R
+```
+
+```{r message=FALSE, warning=FALSE}
+
+# better to plot it (more visual)
+ggcorr(data.num, label = T, geom = "circle", hjust= 1, size = 3, layout.exp = 3) + scale_color_gradient(low = "#D7BFDA", high = "#CC5FE6")
+
+```
+
+It is observed that:
+
+* There are <b>not negative-linear</b> correlated variables.
+* The most <b>positive-linear correlated but obvious</b> are: followers with followers.gained, peak.viewers with average.viewers
+* <b>Other high positive correlated</b> which provide us useful information: watch.time.min with peak.viewers, watch.time.min with followers.
+* <b>Weak positive liner</b> correlated: peak.viewers with followers, peak.viewers with followers.gained, watch.time.min with average.viewers, watch.time.min with followers.gained, watch.time.min with views.gained.
+
+From this information, we can plot several images which can provide us useful insights about our dataset. 
+
+
+### A. Average.viewers and Mature (by Language)
+Although language is not a numeric variable and no correlation coefficients are obtained, it may be worth analyzing it.
+
+```{r}
+ggplot(data) +
+  aes(x = Average.viewers, y = Language) +
+  geom_boxplot(fill = "purple") +
+  theme_minimal()
+```
+
+It seems that there are some languages that have more viewers than others. It is going to be collected the information of viewers per language separated by non-Mature or Mature content.
+
+```{r}
+# using subset to separate between mature and not mature content.
+ggplot1 = ggplot(subset(data, Mature == 1)) +
+  aes(x = Language, y = Average.viewers) +
+  geom_col(fill = "#CD8BDD") +
+  theme_minimal() +
+  facet_wrap(vars(Mature)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, 
+                                   hjust=1)) +
+  labs(title = "No +18 content")
+
+ggplot2 = ggplot(subset(data, Mature == 2)) +
+  aes(x = Language, y = Average.viewers) +
+  geom_col(fill = "#440154") +
+  theme_minimal() +
+  facet_wrap(vars(Mature)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5,   hjust=1)) +
+  labs(title = "+18 content")
+
+grid.arrange(ggplot1, ggplot2, ncol = 2)
+
+```
+</br> 
+<i>Note that the y scale of both graphs is different</i>
+
+<i>Note that there are several languages that ggplot does not show due to its low quantity of viewers</i>
+</br>
+</br>
+
+It is noticed that there are less viewers for +18 content than for non-matured content. 
+
+Do all countries have more viewers of Non-Mature content than Mature content?
+
+```{r}
+list.ratio = list()
+list.languages = unique(data$Language)
+
+# analyzing all languages and creating ratios. If ratio < 1: more Mature content views. If ratio > 1: more Non-Mature content.
+
+# it will be used the notation created before: if Mature == 1 it means the content is not Mature. It Mature == 2, it is Mature content.
+
+for(i in 1:length(list.languages)) {
+  # using the list of languages, we will go language by language.
+  subset = subset(data, Language == list.languages[i])
+  
+  # once we have all the data from that language, the sum of all the   viewers of non-mature content is going to be divided by the views   of mature content.
+  
+  division = sum(subset$Views.gained[which(subset$Mature==1)])        /sum(subset$Views.gained[which(subset$Mature==2)])
+
+  # if the ratio is smaller than 1, it is saved.
+  if (division < 1){
+    list.ratio = c(list.ratio, list.languages[i])
+    list.ratio = c(list.ratio, division)
+  }
+}  
+
+# the languages obtained are displayed:
+list.ratio
+```
+</br>
+It is obtained 4 languages that give more 18+ content than non-matured content: Czech, Hungarian, Finnish and Swedish. The last two mentioned with coefficient 0 as all the streams are +18 (0/x = 0)
+
+Do these countries have a big impact on the platform? <b>How many views do these languages collect?</b>
+
+```{r}
+# adding the sum of the four countries views and comparing it with the total one.
+four.languages= 
+  sum(data$Average.viewers[which(data$Language=="Czech")]) + 
+  sum(data$Average.viewers[which(data$Language=="Hungarian")]) +
+  sum(data$Average.viewers[which(data$Language=="Finnish")]) +
+  sum(data$Average.viewers[which(data$Language=="Swedish")])
+
+# obtaining the total viewers - the four countries
+rest.languages = sum(data$Average.viewers) - four.languages
+
+# for creating a small data frame and plotting it.
+Language = c("four.languages", "rest.languages")
+Average.viewers = c(four.languages,rest.languages)
+
+# to plot:
+comparing = data.frame(Language, Average.viewers)
+
+ggplot(comparing) +
+  aes(x = Language, y = Average.viewers) +
+  geom_col(fill = "#440154") +
+  theme_minimal()
+```
+
+</br>
+As observed, countries with ratio lower than 1 are minimal, so they have a minimal impact on the industry.
+</br>
+
+After, it will be studied the popularity of the languages on their own (paragraph D).
+
+
+### B. Most positive correlated: peak/average viewers and followers(gained).
+```{r}
+ggplot1= ggplot(data) +
+  aes(x = Followers, y = Followers.gained) +
+  geom_point(shape = "circle", size = 1.5, colour = "#CD8BDD") +         theme_light()
+
+ggplot2 = ggplot(data) +
+  aes(x = Peak.viewers, y = Average.viewers) +
+  geom_point(shape = "circle", size = 1.5, colour = "#440154") +
+  theme_light()
+
+grid.arrange(ggplot1, ggplot2, ncol = 2)
+
+```
+</br>
+Obviously, the correlation of these variables is the highest as:
+</br>
+
+* A highest number of followers gained in 2020 will lead to a highest number of followers in total and will contribute to getting a bigger channel.
+
+* A highest peak of viewers may provide the streamer more usual viewers.
+
+### C. Most popular languages
+
+```{r}
+
+ggplot1 = ggplot(data) + aes(x = Language, y = Average.viewers) +               geom_col(fill = "#440154") + theme_minimal() +
+            theme(axis.text.x = element_text(angle = 90, vjust =              0.5, hjust=1))
+
+ggplot2 = ggplot(data) + aes(x = Language, y = Followers) +               geom_col(fill = "#440154") + theme_minimal()+                       theme(axis.text.x =   element_text(angle = 90, vjust =              0.5, hjust=1))
+  
+grid.arrange(ggplot1, ggplot2, ncol = 1)
+
+```
+</br>
+The highest the viewers that language has, the more possibilities more streams with that language has to become more popular. The same happens with followers.
+</br>
+It is observed that English, Spanish, Russian and Korean are the most popular languages. 
+</br>
+Despite this, English "rules" Twitch with a huge difference:
+
+```{r}
+english = sum(data$Average.viewers[which(data$Language == "English")])
+
+rest.languages = sum(data$Average.viewers) - english
+
+# for creating a small data frame and plotting it.
+Language = c("english", "rest.languages")
+Average.viewers = c(english,rest.languages)
+
+# to plot:
+comparing = data.frame(Language, Average.viewers)
+
+ggplot(comparing) +
+  aes(x = Language, y = Average.viewers) +
+  geom_col(fill = "#440154") +
+  theme_minimal()
+```
+</br>
+
+Even when adding all the views other languages channels hold, English continue having more.
+</br>
+
+### D. Watch time min, Stream.time.min and Partenered
+```{r}
+ggplot(data) +
+  aes(
+    x = Watch.time.min,
+    y = Stream.time.min,
+    colour = Partnered
+  ) +
+  geom_point(shape = "plus", size = 1.5) +
+  scale_color_gradient(low = "#4D0969", high = "#D7BFDA") +
+  theme_minimal()
+```
+
+It is observed that non-Partnered streamers have a mean Watch.time.min significantly smaller than the streamers that are partnered.
+
+Testing it: 
+
+```{r}
+# mean of the Watch.time of NON PARTNERED
+mean1=mean(data$Watch.time.min[which(data$Partnered==1)]);mean1
+# mean of the Watch.time of PARTNERED
+mean2=mean(data$Watch.time.min[which(data$Partnered==2)]);mean2
+mean2>mean1
+```
+
+What is more, what happens to the Stream.time.min variable when focusing on the partnered? From the previous plot we can't assume nothing. Let's check it in more detailed: 
+
+```{r}
+# mean of the Stream.time of NON PARTNERED
+mean1=mean(data$Stream.time.min[which(data$Partnered==1)]);mean1
+# mean of the Stream.time of PARTNERED
+mean2=mean(data$Stream.time.min[which(data$Partnered==2)]);mean2
+mean2>mean1
+```
+So, although non-partnered streamers stream more minutes, they have less watch time minutes. 
+
+### E. Partnered, views and followers
+</br>
+Before, it has been analysed Partnered wit Watch.Time.Min and Stream.Time.Min. But how does being Partnered affect the channel?
+
+```{r}
+ggplot(data) +
+  aes(x = Stream.time.min,
+    y = Followers.gained,
+    colour = Partnered
+  ) +
+  geom_point(shape = "plus", size = 1.5) +
+  scale_color_gradient(low = "#260636", high = "#C4ADC8") +
+  theme_minimal()
+```
+</br>
+As observed, only few people among the top 1000 streamers is not partnered. 
+</br>
+Furthermore, non-partnered people are distributed among all the x axis (as said before, the Stream.Time.Min of Non-partnered people have all different values).
+</br>
+Despite this, their followers are all grouped in the smallest values.
+
+Does partnered people have more views and followers? 
+
+<i>It is going to be used the mean of Followers and Viewers because there are only few streamers non-partnered and the sum would provide us very different numbers. </i>
+
+```{r}
+# followeres of different categories
+foll1 = mean(data$Followers[which(data$Partnered==1)])
+foll2 = mean(data$Followers[which(data$Partnered==2)])
+
+Partnered.status = c("non-partenerd", "partenerd")
+Followers = c(foll1, foll2)
+
+comparing1 = data.frame(Partnered.status, Followers)
+
+# average viewers of different categories
+views1 = mean(data$Average.viewers[which(data$Partnered==1)])
+views2 = mean(data$Average.viewers[which(data$Partnered==2)])
+
+Viewers = c(views1, views2)
+
+comparing2 = data.frame(Partnered.status, Followers)
+
+ggplot1 = ggplot(comparing1) +
+  aes(x = Partnered.status, y = Followers) +
+  geom_col(fill = "#CD8BDD") +
+  theme_minimal() + theme(axis.text.x =element_text(angle = 30,       vjust = 1, hjust=1)) +
+  labs(title="Followers")
+
+ggplot2 = ggplot(comparing2) +
+  aes(x = Partnered.status, y = Viewers) +
+  geom_col(fill = "#440154") +
+  theme_minimal() + theme(axis.text.x =element_text(angle = 30,       vjust = 1, hjust=1)) +
+  labs(title="Viewers")
+
+
+grid.arrange(ggplot1, ggplot2, ncol = 2)
+```
+</br>
+As seen, on mean, non-partnered people have more viewers. So a conclusion would be that once you are on top 1000 streamers, your status does not define your success. 
+
+
+## Conclusions
+
+* <b>Non-partnered streamers</b> on mean have: more Stream.time.min, less Watch.time.min, more Average.viewers and less Followers
+
+* <b>Mature content</b> has less viewers.
+
+* There is a big difference of <b>viewers among languages</b>. ore than half of viewers consume <b>English</b> content.
+
+* A <b>peak in viewers</b> can lead to an increment of viewers in the future. The same happens with <b>followers</b>.
+
+## 3. Principal Component Analysis
+
+For PCA, our data set with only numeric variables (data.num) which is already scaled is going to be used.
+
+```{r}
+pca = prcomp(data.num)
+# From dimension 1 to dimension 9 to check importance of the components
+summary(pca)
+
+# Mathematical format
+eigen(R)  
+
+```
+</br>
+With how many components most of the variability will be explained?
+```{r}
+# How many components?
+fviz_screeplot(pca, addlabels = TRUE, title = "Screenplot", barfill = "purple", barcolor = "black")
+
+```
+</br>
+With the first 4 dimensions, we would explain 74% of the variability. With the first <bl>5 dimensions, 83%</bl>.
+
+Now, interpretation of components.
+
+```{r}
+# first component
+barplot(pca$rotation[,1], las=2, col="purple", cex.names = 0.6)
+# should be 1 (eigenvectors)
+sum(pca$rotation[,1]^2)
+
+# plotting squared loadings (contribution of variables to components)
+fviz_contrib(pca, choice = "var", axes = 1, fill = "purple", color = "black")
+
+```
+</br>
+As seen, only the first five variables come to the expected value of contribution. 
+
+With this information, top channels can be ranked.
+
+```{r}
+# Ranking top channels
+
+# WORST
+names[order(pca$x[,1])][(length(names)-10):length(names)]
+# BEST
+names[order(pca$x[,1])][1:10]
+
+```
+</br>
+
+Using the second component:
+
+```{r}
+barplot(pca$rotation[,2], las=2, col="purple", cex.names = 0.6)
+# WORST
+names[order(pca$x[,2])][(length(names)-10):length(names)]
+# TOP 
+names[order(pca$x[,2])][1:10]
+
+# contribution
+fviz_contrib(pca, choice = "var", axes = 2, color = "black", fill = "purple", cex.axis = 0.6)
+```
+</br>
+Less variables came to the expected value of contribution. 
+```{r}
+# checking contribution of each streamer
+
+# between 0 and 100%
+head(get_pca_ind(pca)$contrib[,1])
+
+# between 0 and 1 
+head((pca$x[,1]^2)/(pca$sdev[1]^2))/dim(data.num)[1]
+
+# visualization of top 100 streamers contribution
+fviz_contrib(pca, choice = "ind", axes = 1, top=100, color = "black", fill = "purple")
+
+# which are the top 15?
+names[order(get_pca_ind(pca)$contrib[,1],decreasing=T)][1:15]
+
+# zooming the contribution plot
+
+# TOP 15
+names_z1 = names[order(get_pca_ind(pca)$contrib[,1],decreasing=T)]
+fviz_contrib(pca, choice = "ind", axes = 1, top=15, color = "black", fill = "purple")+scale_x_discrete(labels=names_z1)
+
+
+```
+
+Now, biplot of our PCA is going to be created. 
+
+```{r}
+# good plot although a lot of information
+fviz_pca_biplot(pca, repel = TRUE, col.var = "purple")
+```
+</br>
+The first two scores are going to be studied:
+
+```{r}
+# using minutes streamed for color 
+data.frame(z1=-pca$x[,1],z2=pca$x[,2]) %>% 
+  ggplot(aes(z1,z2,label=names,color=data.num$Stream.time.min)) + 
+  geom_point(size=0) +
+  labs(title="PCA", x="PC1", y="PC2") +
+  theme_bw() + scale_color_gradient(low="#CD8BDD", high="#440154")+theme(legend.position="bottom") +   geom_text(size=2, hjust=0.6, vjust=0, check_overlap = TRUE) 
+```
+</br>
+The two PCAs seem independent by the result of the plot. 
+
+
+-PC1-
+Using PC1, are the best streamers streaming more time? It is used color = Followers 
+so two of the variables that most contribute are used.
+
+```{r}
+data.frame(z1=-pca$x[,1],z2=data.num$Average.viewers) %>% 
+  ggplot(aes(z1,z2,label=names,color=data.num$Followers)) + geom_point(size=0) +
+  labs(title="Performance", x="PC1", y="Average.Viewers") +
+  scale_color_gradient(low="#E1CBE6", high="#440154") +
+  theme_bw() + theme(legend.position="bottom") + geom_text(size=2, hjust=0.6, vjust=0, check_overlap = TRUE)
+```
+</br> 
+Better streamers have more Average.viewers and more Follorers. A positive linear relation can be seen, although it is a bit lost when PC1 is higher.
+
+The same is going to be done but changing the color to Mature and the Y axis to Watch.Time.Min.
+
+```{r}
+data.frame(z1=-pca$x[,1],z2=data.num$Watch.time.min) %>% 
+  ggplot(aes(z1,z2,label=names,color=data.num$Mature)) + geom_point(size=0) +
+  labs(title="Performance", x="PC1", y="Watch.Time.Min") +
+  scale_color_gradient(low="#E1CBE6", high="#440154") +
+  theme_bw() + theme(legend.position="bottom") + geom_text(size=2, hjust=0.6, vjust=0, check_overlap = TRUE)
+```
+</br> 
+Again, a positive linear relationship is shown. Furthermore, almost all values of mature content are grouped in low values of the PC1 and Watch.Time.Min.
+
+-PC2-
+```{r}
+data.frame(z1=-pca$x[,2],z2=data.num$Stream.time.min) %>% 
+  ggplot(aes(z1,z2,label=names,color=data.num$Views.gained)) + geom_point(size=0) +
+  labs(title="Performance", x="PC2", y="Stream.Time.Min") +
+  scale_color_gradient(low="#E1CBE6", high="black") +
+  theme_bw() + theme(legend.position="bottom") + geom_text(size=2, hjust=0.6, vjust=0, check_overlap = TRUE)
+```
+</br>
+<i> Note that the data is scale, that's why there would be negative valies </i>
+
+Using the two variables that most contribute to PC2, it is obtained a negative exponential distribution. The more PC2, the less Stream.Time.Min that streamer has. Furthermore, Views.gained does not seem to give us any conclusion.
+
+Summarizing, it can be remembered the contribution of the variables in each PCA. It is used fviz_pca_var instead of biplot in order not to show individuals (which is a little bit messy).
+
+```{r}
+fviz_pca_var(pca, col.var = "contrib",
+             gradient.cols = c("grey", "#A553B9", "black"), ggtheme = theme_minimal())
+```
+</br>
+
+## Conclusions 
+
+* <b>Mature and Partnered</b> all the variables with less contributions in both PCs
+
+* <b>Watch.Time.Min</b> is the variable that most contribution provides in both PCs, along with Views.gained
+
+* <b>Stream.Time.Min</b> has a lot of meaning in PC2, but nothing in PC1.
+
+* Other variables contribute a lot in PC1 (such as Followers), but nothing in PC2.
+
+
+## 4. Factor analysis
+
+```{r}
+x.f <- factanal(data.num, factors = 3, rotation="none", scores="regression")
+x.f
+
+```
+</br>
+It is noted that the Mature and Partnered variable have an uniqueness (=noise) of almost 1, which means that the factors do not account well for its variance.
+
+In loadings it is measured the contribution of that variable to the factor. 
+
+A factor is worth keeping if the SS loading is greater than 1 (Kaiser’s rule). This happens to us with Factor 1.
+
+Furthermore, p-value = 0.0599 > 0.05 which means we do not reject Ho (the number of factors in the model is 3). Sso we have fitted an appropiate model.
+
+Focusing on loadings and uniqueness:
+```{r}
+cbind(x.f$loadings, x.f$uniquenesses)
+```
+</br>
+As observed, some variables are well-explained the model such as Watch.Time.Min and Average.viewers (due to its low uniquess). Others, are almost unique 100% such as Mature and Partnered. Peak.viewers or Followers are others with an uniqueness between 0.30 and 0.45. 
+
+```{r}
+# plotting loadings of the 3 factors
+par(mfrow=c(3,1))
+barplot(x.f$loadings[,1], names=F, las=2, col="purple", ylim = c(-1, 1), cex.names = 0.7)
+barplot(x.f$loadings[,2], names=F, las=2, col="purple", ylim = c(-1, 1), cex.names = 0.7)
+barplot(x.f$loadings[,3], las=2, col="purple", ylim = c(-1, 1), cex.names = 0.6)
+```
+</br>
+The same process will be repeated but with 2 factors, a different rotation and different scores.
+```{r}
+x.f <- factanal(data.num, factors = 2, rotation="varimax", scores="Bartlett", lower = 0.01)
+x.f
+```
+The most noticeable thing is our p-value, which is almost 0, meaning that this model should be rejected. 
+
+Furthermore, uniqueness continue to be very high in several variables.
+
+Despite this, SS loadings are good (higher than 1).
+
+```{r}
+cbind(x.f$loadings, x.f$uniquenesses)
+```
+The loadings are plotted:
+```{r}
+par(mfrow=c(2,1))
+barplot(x.f$loadings[,1], names=F, las=2, col="purple", ylim = c(-1, 1), cex.names = 0.6)
+barplot(x.f$loadings[,2], las=2, col="purple", ylim = c(-1, 1),cex.names = 0.6)
+```
+</br>
+
+## Conclusions: 
+
+* In the first model, <b>Watch.Time.Min and Average.Viewers</b> could explain 99% if the variability. 
+* On the other side, <b>Partnered, Mature and Stream.Time.Min</b> produce a lot of noise and does not contribute to it. 
+* <b>Followers</b> explain almost 80% of the variability which is not bad. 
+* The rest of the variables had a medium level of uniqueness and did not contribute much on our model.
+
+## 5. Clustering
+
+K-means is going to be used. The only-numeric data set is going to be used. 
+
+First, it should be defined the correct numbers of clusters. Let's use different methods:
+
+```{r}
+#elbow method
+fviz_nbclust(data.num, kmeans, method = 'wss')
+
+#silhouette method
+fviz_nbclust(data.num, kmeans, method = 'silhouette')
+
+#gap statitic method
+fviz_nbclust(data.num, kmeans, method = 'gap_stat', k.max = 20)
+
+
+```
+</br>
+Taking this into account, the last method (gap statistic) can be forgotten as only 1 cluster is obtained although it may be the most accurate one. 
+
+Elbow method may suggest 5 clusters although the shape is not clear.
+
+So, let's make 2 clusters as silhouette method suggests.
+
+```{r}
+fit = kmeans(data.num, centers=2, nstart=100)
+groups = fit$cluster
+groups
+
+barplot(table(groups), col="purple")
+```
+</br>
+Almost all the data is in cluster 2.
+
+
+```{r}
+centers=fit$centers
+
+i=1  # plottinng the centers in cluster 1
+bar1=barplot(centers[i,], las=2, col="purple", ylim=c(-2,2), main=paste("Cluster", i,": Group center in purple, global center in red"), cex.names = 0.6)
+points(bar1,y=apply(data.num, 2, quantile, 0.50),col="red",pch=19)
+```
+</br>
+<i> Note that red circles symbolizes the center of all of our data, while the bar the center of cluster 1 in this case</i>
+```{r}
+i=2  # plotting the centers in cluster 2
+bar2=barplot(centers[i,], las=2, col="purple", ylim=c(-2,2), main=paste("Cluster", i,": Group center in purple, global center in red"), cex.names = 0.6)
+points(bar2,y=apply(data.num, 2, quantile, 0.50),col="red",pch=19)
+```
+</br>
+<i> Note that red circles symbolizes the center of all of our data, while the bar the center of cluster 2 in this case</i>
+
+A clusplot is created with our two previous groups.
+
+```{r}
+# saving the plots for later
+a = fviz_cluster(fit, data = data.num, geom = c("point"),ellipse.type = 'norm', pointsize=1, 
+main ="cluster plot")+
+theme_minimal()+geom_text(label=names,hjust=0, vjust=0,size=2,check_overlap = T)+scale_fill_brewer(palette="Paired");a
+```
+</br>
+Now, a silhouette plot is formed.
+
+```{r}
+dist <- dist(data.num, method="euclidean")  
+sil = silhouette(groups,dist)
+plot(sil, col=1:2, main="", border=NA)
+```
+</br>
+
+What are the difference among both clusters? Let's study it:
+```{r}
+as.data.frame(data.num) %>% mutate(cluster=factor(groups), Watch.time.min=Watch.time.min, Average.viewers=Average.viewers, Followers=Followers) %>%
+ggplot(aes(x = cluster, y = Watch.time.min)) + 
+geom_boxplot(fill="purple") +
+labs(title = "Watch time of streamers (SCALED)", x = "", y = "", col = "") 
+```
+</br> 
+
+It is observed that streamers in one cluster are being watched much more than on the other cluster.
+
+```{r}
+as.data.frame(data.num) %>% mutate(cluster=factor(groups), Watch.time.min=Watch.time.min, Average.viewers=Average.viewers, Followers=Followers) %>%
+  ggplot(aes(x = cluster, y = Average.viewers)) + 
+  geom_boxplot(fill="purple") +
+  labs(title = "Average viewers of streamers (SCALED)", x = "", y = "", col = "")
+
+
+as.data.frame(data.num) %>% mutate(cluster=factor(groups), Watch.time.min=Watch.time.min, Average.viewers=Average.viewers, Followers=Followers) %>%
+ggplot(aes(x = cluster, y = Followers)) + 
+geom_boxplot(fill="purple") +
+labs(title = "Followers of streamers (SCALED)", x = "", y = "", col = "") 
+```
+
+</br>
+The same happens for Average.viewers and Followers.
+
+We could conclude that one cluster (2) contains the "worst" streamers in our top 1000: less followers, viewers... The other (1) contains most succesfull people on Twitch.
+
+Now, let's do <b>k means with Mahalanobis distance</b>.
+
+```{r}
+S_x <- cov(data.num)
+iS <- solve(S_x)
+e <- eigen(iS)
+V <- e$vectors
+B <- V %*% diag(sqrt(e$values)) %*% t(V)
+Xtil <- scale(data.num,scale = FALSE)
+dataS <- Xtil %*% B
+```
+
+```{r}
+fit.mahalanobis = kmeans(dataS, centers=2, nstart=100)
+groups = fit.mahalanobis$cluster
+centers=fit.mahalanobis$centers
+colnames(centers)=colnames(data.num)
+centers
+```
+```{r}
+i=1  # plotting the centers in cluster 1
+bar1=barplot(centers[i,], las=2, col="purple", ylim=c(-2,2), main=paste("Cluster", i,": Group center in purple, global in red"), cex.names = 0.6)
+points(bar1,y=apply(data.num, 2, quantile, 0.50),col="red",pch=19)
+```
+```{r}
+i=2  # plotting the centers in cluster 2
+bar2=barplot(centers[i,], las=2, col="purple", ylim=c(-2,2), main=paste("Cluster", i,": Group center in purple, global in red"), cex.names = 0.6)
+points(bar2,y=apply(data.num, 2, quantile, 0.50),col="red",pch=19)
+```
+```{r}
+b = fviz_cluster(fit.mahalanobis, data = data.num, geom = c("point"),ellipse.type = 'norm', pointsize=1,  main = " cluster plot k means with Mahalanobis distance") +
+theme_minimal()+geom_text(label=names,hjust=0,vjust=0,size=2, 
+check_overlap = T)+scale_fill_brewer(palette="Paired");b
+```
+
+```{r}
+adjustedRandIndex(fit$cluster, fit.mahalanobis$cluster)
+```
+
+Both clustering are very very different. The first one, groups more streamers. The Mahalanobis clustering does not define our dataset completely leaving a lot of streamers outside our clusters.
+
+It can be tried other types of clustering. Let's see Kernel k-means, hierarchical clustering and PAM.
+
+First, <b> Kernel k-means clustering </b>
+```{r}
+# Radial Basis kernel (Gaussian), two clusters
+fit.ker <- kkmeans(as.matrix(data.num), centers=2, kernel="rbfdot")
+centers(fit.ker)
+```
+```{r}
+# size of our two clusters
+size(fit.ker)
+```
+
+```{r}
+# cluster sum of squares
+withinss(fit.ker)
+```
+
+```{r}
+object.ker = list(data = data.num, cluster = fit.ker@.Data)
+
+c= fviz_cluster(object.ker, geom = c("point"), ellipse=F,pointsize=1, main =" cluster plot Kernel k-means") + theme_minimal()+geom_text(label=names,hjust=0,                           vjust=0,size=2,check_overlap = T)+scale_fill_brewer(palette="Paired");c
+```
+</br>
+Later, this cluster will be compared with the previous ones. Before that, let's make <b>hierarchical cluster</b> also.
+
+```{r}
+dist = dist(scale(data.num), method = "euclidean")
+hc = hclust(dist, method = "ward.D2")
+
+hc$labels = names
+
+d = fviz_dend(x = hc,
+k = 2,
+color_labels_by_k = TRUE,
+cex = 0.4,
+type = "phylogenic",
+repel = TRUE)+  
+labs(title=" hierarchical tree clustering") +             theme(axis.text.x=element_blank(),axis.text.y=element_blank());d
+```
+</br>
+<i> Note that there are too many names to be shown in the plot </i>
+
+Lastly, let's try PAM clustering.
+
+```{r}
+fit.pam <- eclust(data.num, "pam", stand=TRUE, k=2, graph=F)
+
+e=fviz_cluster(fit.pam, data = data.num, geom = c("point"), pointsize=1, main ="cluster plot PAM")+
+theme_minimal()+geom_text(label=names,hjust=0,                      vjust=0,size=2,check_overlap =                                      F)+scale_fill_brewer(palette="Paired");e
+```
+</br>
+## Conclusions
+</br>
+With this, all possible methods have been done. Let's recall all the different results:
+
+```{r}
+grid.arrange(a,b,c,d,e,ncol=2)
+```
+</br>
+
+As seen, all the clusters divide the zones similarly. Despite this, as it has been said before, Mahalabonis clustering leave too much streamers outside. Other clusterings techniques seem to do a good job. 
+
+What is more, it has been seen that clusters divide streamers depending on Watch.time.min, Followers and Viewers on its majority.
+
+## Final conclusions of the project
+
+Throughout this projects plots and unsupervised learning techniques have been used in order to get some conclusions about our initial question: <b> what makes a streamer great? </b>. And for answering that questions we had to determine which were the variables on our data set that could provide us some clues.
+
+When it comes to <b> mature </b> and <b>partnered</b>, Principal Component Analysis gave our model a lot of noise and did not contribute to the definition of any model. For example, the mean of Average.Viewers of non-partnered was higher than the one of partnered, but the opposite happened with Followers. So for the final answer of our question, we must leave this variables apart.
+
+Then, although <b>Language</b> variable couldn't be analysed by any unsupervised learning, it must be remembered the huge amount of viewers and followers that English held on its own.
+
+Furthermore, all the variables related with <b>followers and viewers</b> contributed to our model in a medium level: these contributed to one or another PCA and explained the variability of our model among 0.5 and 0.8. Despite this, Peak.viewers and Views.gained had a weaker impact, as they had a medium impact in a technique and a lower in the other. Special mention to Average.Viewers which explained 99% of the variability in Factor analysis. So our initial assumptions of the impact of these variables can be hold and the ones obtained in clustering too.
+
+<b> Stream.time.min</b> provided a 79% of noise (uniqueness) and it should be forgotten.
+
+And finishing, <b>Watch.Time.Min</b> is our "star" variable: in PCA, it contributed to both PCA highly and explained 99% of the variability in the model. Again, initial assumptions can be held along with the ones of the cluster.
+
+Before finishing concluding, I think it would be very interesting to extend this data set with the number of bits (donations) that streamer had,the number of adds per hour used and the subscriptions in its channel in order to make a more specific analysis. Unfortunately, this information is not free and could not be used in this project.
+
+And now, taking all this into account, all assumptions about Mature and Partnered should be forgotten. Summarizing the rest of assumptions:
+
+* More viewers and more followers go hand by hand. The same happens with less viewers and followers. 
+
+* More viewer and followers mean a higher watch time of the streamer.
+
+* A peak of viewers can lead to an increment of average viewers and as a consequence, of followers.
+
+
+
+
+
